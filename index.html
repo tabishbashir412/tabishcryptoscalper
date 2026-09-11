@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tabish Crypto Scalper V4</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#07101d;color:#e8eef7}
+header{padding:18px 22px;border-bottom:1px solid #1b2a3d;background:#0b1626;position:sticky;top:0;z-index:5}
+h1{margin:0;font-size:22px}.sub{color:#91a4bb;font-size:13px;margin-top:5px}
+.wrap{padding:18px;max-width:1500px;margin:auto}.bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px}
+input,select,button{background:#101d2e;color:#fff;border:1px solid #29405a;border-radius:8px;padding:11px 13px}
+input{min-width:260px;flex:1}button{cursor:pointer}button:hover{background:#172940}
+.status{padding:11px 14px;border-radius:8px;background:#0e1b2b;margin-bottom:15px;color:#b9c8d9}
+.ok{color:#69e39a}.bad{color:#ff7d7d}.muted{color:#91a4bb}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px}.stat{background:#0d1a2a;border:1px solid #1b2c40;border-radius:10px;padding:10px 14px}
+.tablebox{overflow:auto;border:1px solid #1b2c40;border-radius:10px;background:#0b1625}
+table{width:100%;border-collapse:collapse;min-width:1250px}th,td{padding:10px 9px;border-bottom:1px solid #17273a;text-align:left;font-size:13px;white-space:nowrap}th{background:#0f1d2e;position:sticky;top:73px;z-index:2;color:#aebfd2}
+.pos{color:#59e391}.neg{color:#ff7474}.neu{color:#c6d0db}.buy{color:#59e391;font-weight:700}.sell{color:#ff7474;font-weight:700}
+.coin{font-weight:700}.small{font-size:11px;color:#8296ad}.pill{padding:4px 7px;border-radius:999px;background:#15263a}
+</style>
+</head>
+<body>
+<header>
+<h1>PUBLIC SCANNER — Tabish Crypto Scalper V4</h1>
+<div class="sub">Free • No login • Binance public market data</div>
+</header>
+<div class="wrap">
+<div class="bar">
+<input id="search" placeholder="Search coin e.g. BTC, ETH, SOL..." autocomplete="off">
+<select id="tf"><option>30M</option><option selected>1H</option><option>4H</option><option>D1</option><option>D2</option><option>D3</option><option>W1</option></select>
+<select id="signal"><option value="all">All signals</option><option value="buy">BUY</option><option value="sell">SELL</option><option value="neutral">NEUTRAL</option></select>
+<button id="refresh">Refresh</button>
+</div>
+<div id="status" class="status">Connecting to Binance…</div>
+<div class="stats">
+<div class="stat">Pairs: <b id="count">0</b></div>
+<div class="stat">Showing: <b id="shown">0</b></div>
+<div class="stat">Data: <b id="dataState">Waiting</b></div>
+</div>
+<div class="tablebox">
+<table><thead><tr>
+<th>Coin</th><th>Price</th><th>24H %</th><th>24H Volume</th><th>RSI</th><th>Trend</th><th>Momentum</th><th>Divergence</th><th>S/R</th><th>Score</th><th>Signal</th>
+</tr></thead><tbody id="rows"></tbody></table>
+</div>
+<p class="small">V4 uses Binance public market-data endpoints and the all-market mini-ticker WebSocket. Technical values are calculated from real Binance klines for the actively displayed coins.</p>
+</div>
+<script>
+const REST="https://data-api.binance.vision";
+const WS="wss://data-stream.binance.vision:443/ws/!miniTicker@arr";
+const S={pairs:[],tickers:new Map(),klines:new Map(),ws:null,search:"",tf:"1h"};
+const $=id=>document.getElementById(id);
+function esc(x){return String(x).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+function setStatus(t,c=""){ $("status").innerHTML=t; $("status").className="status "+c}
+function fmt(n){if(!isFinite(n))return"-"; if(n>=1000)return n.toLocaleString(undefined,{maximumFractionDigits:2}); if(n>=1)return n.toFixed(4); return n.toPrecision(5)}
+async function get(path){
+ const r=await fetch(REST+path,{cache:"no-store"});
+ if(!r.ok) throw Error("HTTP "+r.status);
+ return r.json();
+}
+function rsi(closes,period=14){
+ if(closes.length<period+1)return null;
+ let g=0,l=0;
+ for(let i=closes.length-period;i<closes.length;i++){let d=closes[i]-closes[i-1];if(d>0)g+=d;else l-=d}
+ if(l===0)return 100;
+ return 100-(100/(1+g/l));
+}
+function calc(symbol){
+ const ks=S.klines.get(symbol); if(!ks)return {rsi:null,trend:"Loading",mom:"—",div:"—",sr:"—",score:0,signal:"NEUTRAL"};
+ const c=ks.map(x=>+x[4]), rv=rsi(c), n=c.length;
+ const trend=n>50?(c[n-1]>c[n-21]?"Bullish":"Bearish"):"—";
+ let mom="Neutral",score=50;
+ const prev=S.klines.get(symbol+"_30m"), one=S.klines.get(symbol+"_1h");
+ if(prev&&one){
+   const r30=rsi(prev.map(x=>+x[4])), r1=rsi(one.map(x=>+x[4]));
+   if(r1!=null&&r30!=null){if(r1<=30&&r30>30){mom="Positive";score+=15}else if(r1>30&&r30<=30){mom="Negative";score-=15}}
+ }
+ let div="—";
+ if(n>=35){
+   const a=rsi(c.slice(-25)), b=rsi(c.slice(-35,-10));
+   if(a!=null&&b!=null){
+     const priceLow=c.slice(-25).reduce((x,y)=>Math.min(x,y),Infinity), oldLow=c.slice(-35,-10).reduce((x,y)=>Math.min(x,y),Infinity);
+     const priceHigh=c.slice(-25).reduce((x,y)=>Math.max(x,y),-Infinity), oldHigh=c.slice(-35,-10).reduce((x,y)=>Math.max(x,y),-Infinity);
+     if(priceLow<oldLow && a>b){div="Bullish";score+=20}
+     else if(priceHigh>oldHigh && a<b){div="Bearish";score-=20}
+   }
+ }
+ let signal=score>=65?"BUY":score<=35?"SELL":"NEUTRAL";
+ return {rsi:rv,trend,mom,div,sr:"Auto",score,signal};
+}
+function render(){
+ const q=S.search.toUpperCase().trim(), sig=$("signal").value;
+ let list=S.pairs.filter(p=>!q||p.symbol.includes(q));
+ if(sig!=="all")list=list.filter(p=>(calc(p.symbol).signal.toLowerCase()===sig));
+ $("count").textContent=S.pairs.length;$("shown").textContent=list.length;
+ $("rows").innerHTML=list.slice(0,500).map(p=>{
+   const t=S.tickers.get(p.symbol)||{}, a=calc(p.symbol);
+   const ch=+t.P||0;
+   return `<tr><td class="coin">${esc(p.symbol.replace("USDT",""))}<span class="small">/USDT</span></td>
+   <td>${fmt(+t.c)}</td><td class="${ch>=0?'pos':'neg'}">${ch>=0?"+":""}${ch.toFixed(2)}%</td>
+   <td>${fmt(+t.q)}</td><td>${a.rsi==null?"—":a.rsi.toFixed(1)}</td>
+   <td>${a.trend}</td><td class="${a.mom==="Positive"?"pos":a.mom==="Negative"?"neg":"neu"}">${a.mom}</td>
+   <td class="${a.div==="Bullish"?"pos":a.div==="Bearish"?"neg":"neu"}">${a.div}</td><td>${a.sr}</td>
+   <td>${a.score}</td><td class="${a.signal==="BUY"?"buy":a.signal==="SELL"?"sell":"neu"}">${a.signal}</td></tr>`;
+ }).join("") || `<tr><td colspan="11" class="muted">No coins found.</td></tr>`;
+}
+async function loadPairs(){
+ setStatus("Loading Binance USDT pairs…");
+ const info=await get("/api/v3/exchangeInfo");
+ S.pairs=info.symbols.filter(x=>x.status==="TRADING"&&x.quoteAsset==="USDT"&&!/(UP|DOWN|BULL|BEAR)USDT$/.test(x.symbol));
+ setStatus("Binance connected • "+S.pairs.length+" USDT pairs loaded","ok");
+ render();
+ // Load technical data only for visible/first 60 to keep the public browser stable.
+ for(const p of S.pairs.slice(0,60)) loadKlines(p.symbol).catch(()=>{});
+}
+async function loadKlines(symbol){
+ const key=S.tf==="D1"?"1d":S.tf==="D2"?"1d":S.tf==="D3"?"1d":S.tf==="W1"?"1w":S.tf.toLowerCase();
+ const d=await get(`/api/v3/klines?symbol=${symbol}&interval=${key}&limit=100`);
+ S.klines.set(symbol,d);
+ if(key==="1h"){const d1=await get(`/api/v3/klines?symbol=${symbol}&interval=30m&limit=50`);S.klines.set(symbol+"_30m",d1);S.klines.set(symbol+"_1h",d)}
+ render();
+}
+function connectWS(){
+ try{
+  if(S.ws)S.ws.close();
+  S.ws=new WebSocket(WS);
+  S.ws.onopen=()=>{ $("dataState").textContent="Live"; setStatus("Binance connected • Live prices active","ok")};
+  S.ws.onmessage=e=>{
+   const arr=JSON.parse(e.data); if(!Array.isArray(arr))return;
+   arr.forEach(t=>{if(t.s&&t.s.endsWith("USDT"))S.tickers.set(t.s,t)});
+   render();
+  };
+  S.ws.onerror=()=>setStatus("Binance WebSocket unavailable — trying REST data…","bad");
+  S.ws.onclose=()=>{ $("dataState").textContent="Reconnecting"; setTimeout(connectWS,4000)};
+ }catch(e){setTimeout(connectWS,4000)}
+}
+async function start(){
+ try{
+  // lightweight connectivity test first
+  await get("/api/v3/ping");
+  await loadPairs();
+  const d=await get("/api/v3/ticker/24hr");
+  d.filter(x=>x.symbol&&x.symbol.endsWith("USDT")).forEach(t=>S.tickers.set(t.symbol,t));
+  render(); connectWS();
+ }catch(e){
+  setStatus("Binance connection failed: "+esc(e.message)+". Click Refresh to retry.","bad");
+  $("dataState").textContent="Failed";
+ }
+}
+$("search").addEventListener("input",e=>{S.search=e.target.value;render()});
+$("signal").addEventListener("change",render);
+$("tf").addEventListener("change",e=>{S.tf=e.target.value.toLowerCase();render(); S.pairs.slice(0,60).forEach(p=>loadKlines(p.symbol).catch(()=>{}))});
+$("refresh").onclick=()=>start();
+start();
+</script>
+</body></html>
